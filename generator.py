@@ -63,7 +63,7 @@ class AugmentedImageSequence(Sequence):
 
     def transform_batch_images(self, batch_x):
         if self.augmenter is not None:
-            batch_x = self.augmenter.augment_images(batch_x)
+            batch_x = [self.augmenter(image=img)["image"] for img in batch_x] # self.augmenter.augment(batch_x)
         imagenet_mean = np.array([0.485, 0.456, 0.406])
         imagenet_std = np.array([0.229, 0.224, 0.225])
         batch_x = (batch_x - imagenet_mean) / imagenet_std
@@ -83,7 +83,7 @@ class AugmentedImageSequence(Sequence):
 
     def prepare_dataset(self):
         df = self.dataset_df.sample(frac=1., random_state=self.random_state)
-        self.x_path, self.y = df["Image Index"].as_matrix(), df[self.class_names].as_matrix()
+        self.x_path, self.y = df["Image Index"].to_numpy(), df[self.class_names].to_numpy()
 
     def on_epoch_end(self):
         if self.shuffle:

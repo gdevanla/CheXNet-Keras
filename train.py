@@ -7,7 +7,7 @@ from configparser import ConfigParser
 from generator import AugmentedImageSequence
 from keras.callbacks import ModelCheckpoint, TensorBoard, ReduceLROnPlateau
 from keras.optimizers import Adam
-from keras.utils import multi_gpu_model
+#from keras.utils import multi_gpu_model
 from models.keras import ModelFactory
 from utility import get_sample_counts
 from weights import get_class_weights
@@ -79,6 +79,7 @@ def main():
             shutil.copy(os.path.join(dataset_csv_dir, f"{dataset}.csv"), output_dir)
 
         # get train/dev sample counts
+        print(class_names)
         train_counts, train_pos_counts = get_sample_counts(output_dir, "train", class_names)
         dev_counts, _ = get_sample_counts(output_dir, "dev", class_names)
 
@@ -109,13 +110,16 @@ def main():
 
         # compute class weights
         print("** compute class weights from training data **")
-        class_weights = get_class_weights(
+        class_weights_list = get_class_weights(
             train_counts,
             train_pos_counts,
             multiply=positive_weights_multiply,
         )
         print("** class_weights **")
-        print(class_weights)
+
+        class_weights = dict()
+        for class_name, cw in zip(class_names, class_weights_list):
+            class_weights[class_name] = cw
 
         print("** load model **")
         if use_trained_model_weights:
@@ -181,7 +185,7 @@ def main():
             )
 
         print("** compile model with class weights **")
-        optimizer = Adam(lr=initial_learning_rate)
+        optimizer = Adam(learning_rate=initial_learning_rate)
         model_train.compile(optimizer=optimizer, loss="binary_crossentropy")
         auroc = MultipleClassAUROC(
             sequence=validation_sequence,
@@ -192,22 +196,23 @@ def main():
         )
         callbacks = [
             checkpoint,
-            TensorBoard(log_dir=os.path.join(output_dir, "logs"), batch_size=batch_size),
+            TensorBoard(log_dir=os.path.join(output_dir, "logs")),
             ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=patience_reduce_lr,
                               verbose=1, mode="min", min_lr=min_lr),
             auroc,
         ]
 
         print("** start training **")
-        history = model_train.fit_generator(
-            generator=train_sequence,
+        history = model_train.fit(
+            train_sequence,
             steps_per_epoch=train_steps,
             epochs=epochs,
             validation_data=validation_sequence,
             validation_steps=validation_steps,
             callbacks=callbacks,
             class_weight=class_weights,
-            workers=generator_workers,
+            #workers=generator_workers,
+            #use_multiprocessing=True,
             shuffle=False,
         )
 
