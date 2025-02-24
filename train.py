@@ -13,11 +13,37 @@ from utility import get_sample_counts
 from weights import get_class_weights
 from augmenter import augmenter
 import tensorflow as tf
+from tensorflow.keras import mixed_precision
+
 
 for gpu in tf.config.experimental.list_physical_devices('GPU'):
     tf.config.experimental.set_memory_growth(gpu, True)
 
+
+class StopIfFileExistsCallback(tf.keras.callbacks.Callback):
+    def __init__(self, stop_file):
+        super().__init__()
+        self.stop_file = stop_file
+
+    def on_epoch_end(self, epoch, logs=None):
+        """Check if stop file exists before starting an epoch."""
+        print(f"Looking for instrution to stop, {os.path.exists(self.stop_file)=}")
+        if os.path.exists(self.stop_file):
+            print(f"Stopping training: {self.stop_file} found.")
+            self.model.stop_training = True  # Stop training
+    
+
 def main():
+
+    # Get current precision policy
+    current_policy = mixed_precision.global_policy()
+    print("Current Mixed Precision Policy:", current_policy)
+    mixed_precision.set_global_policy("mixed_float16")
+    print("Upated Mixed Precision Policy", mixed_precision.global_policy())
+
+    tf.config.optimizer.set_jit(True)
+    print("XLA JIT Compilation Enabled:", tf.config.optimizer.get_jit())
+    
     # parser config
     config_file = "./config.ini"
     cp = ConfigParser()
@@ -68,6 +94,7 @@ def main():
         os.makedirs(output_dir)
 
     running_flag_file = os.path.join(output_dir, ".training.lock")
+    print(running_flag_file)
     if os.path.isfile(running_flag_file):
         raise RuntimeError("A process is running in this directory!!!")
     else:
@@ -133,13 +160,40 @@ def main():
         else:
             model_weights_file = None
 
-        model_factory = ModelFactory()
-        model = model_factory.get_model(
-            class_names,
-            model_name=base_model_name,
-            use_base_weights=use_base_model_weights,
-            weights_path=model_weights_file,
-            input_shape=(image_dimension, image_dimension, 3))
+
+        checkpoint_dir = "./checkpoints/"
+        checkpoint_path = "./checkpoints/epoch-{epoch:02d}-val_loss-{val_loss:.2f}.keras"
+        latest_checkpoint = None # tf.train.latest_checkpoint(os.path.normpath(checkpoint_dir))
+        last_epoch = 0
+        def get_latest_checkpoint():
+            import glob
+            latest_checkpoint = None # tf.train.latest_checkpoint(os.path.normpath(checkpoint_dir))
+            last_epoch = 0
+            checkpoint_files = sorted(glob.glob(checkpoint_dir + "*"))
+            if checkpoint_files:
+                latest_checkpoint = checkpoint_files[-1]
+                print(f"Latest checkpoint found = {latest_checkpoint=}")
+                import re
+                match = re.search(r'epoch-(\d+)', latest_checkpoint)
+                if match:
+                    last_epoch = int(match.group(1))  # Convert to integer
+                    print(f"Resuming from epoch {last_epoch + 1}")
+                else:
+                    last_epoch = 0
+            return latest_checkpoint, last_epoch
+        latest_checkpoint, last_epoch = get_latest_checkpoint()
+        print(f"Startng with checkpoint file {latest_checkpoint=} and {last_epoch=}")
+        if latest_checkpoint:
+            print(f'Resuming training from {latest_checkpoint}')
+            model = tf.keras.models.load_model(latest_checkpoint)
+        else:
+            model_factory = ModelFactory()
+            model = model_factory.get_model(
+                class_names,
+                model_name=base_model_name,
+                use_base_weights=use_base_model_weights,
+                weights_path=model_weights_file,
+                input_shape=(image_dimension, image_dimension, 3))
 
         if show_model_summary:
             print(model.summary())
@@ -168,6 +222,7 @@ def main():
         output_weights_path = os.path.join(output_dir, output_weights_name)
         print(f"** set output weights path to: {output_weights_path} **")
 
+
         print("** check multiple gpu availability **")
         gpus = len(os.getenv("CUDA_VISIBLE_DEVICES", "1").split(","))
         if gpus > 1:
@@ -180,12 +235,28 @@ def main():
             )
         else:
             model_train = model
+            # checkpoint = ModelCheckpoint(
+            #      output_weights_path,
+            #      save_weights_only=True,
+            #      save_best_only=True,
+            #      verbose=1,
+            # )
             checkpoint = ModelCheckpoint(
-                 output_weights_path,
-                 save_weights_only=True,
-                 save_best_only=True,
-                 verbose=1,
+                #output_weights_path,
+                checkpoint_path,
+                save_weights_only=False,
+                save_best_only=False,
+                verbose=1,
+                save_freq='epoch'
             )
+
+        best_model_callback = ModelCheckpoint(
+            filepath=output_weights_path,
+            monitor="val_loss",
+            save_best_only=True,  # Save only when model improves
+            save_weights_only=False,  # Save full model
+            verbose=1
+        )
 
         print("** compile model with class weights **")
         optimizer = Adam(learning_rate=initial_learning_rate)
@@ -197,13 +268,18 @@ def main():
             stats=training_stats,
             workers=generator_workers,
         )
+
+        stop_callback = StopIfFileExistsCallback("./stop_training.txt")
         callbacks = [
             checkpoint,
+            best_model_callback,
             TensorBoard(log_dir=os.path.join(output_dir, "logs")),
             ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=patience_reduce_lr,
                               verbose=1, mode="min", min_lr=min_lr),
             auroc,
+            stop_callback
         ]
+
 
         print("** start training **")
         history = model_train.fit(
@@ -217,6 +293,7 @@ def main():
             #workers=generator_workers,
             #use_multiprocessing=True,
             shuffle=False,
+            initial_epoch=last_epoch
         )
 
         # dump history
