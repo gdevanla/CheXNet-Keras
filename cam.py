@@ -93,7 +93,7 @@ def main():
 
     # CAM config
     bbox_list_file = cp["CAM"].get("bbox_list_file")
-    use_best_weights = cp["CAM"].getboolean("use_best_weights")
+    use_best_weights = True # cp["CAM"].getboolean("use_best_weights")
 
     print("** load model **")
     if use_best_weights:
